@@ -40,7 +40,7 @@ let resolve_loc pfs gamma loc =
             Format.asprintf "Unsupported location: %a with pfs:\n%a" Expr.pp
               loc' PureContext.pp pfs
           in
-          Logging.verbose (fun m -> m "%s" msg);
+          Logging.verbose ~severity:Error (fun m -> m "%s" msg);
           raise (Failure msg) )
 
 let get_cell heap pfs gamma (loc : vt) (offset : vt) =

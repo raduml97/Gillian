@@ -263,35 +263,40 @@ struct
       | _ -> false
 
     let run debug (prog : ('a, int) Prog.t) : unit =
-      let prog =
-        match UP.init_prog prog with
-        | Ok prog -> prog
-        | _       -> failwith "Program could not be initialised"
-      in
-      let ret = CInterpreter.evaluate_prog prog in
-      let () =
-        if debug then
-          Format.printf "Final state: @\n%a@\n" CInterpreter.pp_result ret
-      in
-      return_to_exit (valid_concrete_result ret)
+      L.with_normal_phase ~title:"Execution" (fun () ->
+          let prog =
+            match UP.init_prog prog with
+            | Ok prog -> prog
+            | _       -> failwith "Program could not be initialised"
+          in
+          let ret = CInterpreter.evaluate_prog prog in
+          let () =
+            if debug then
+              Format.printf "Final state: @\n%a@\n" CInterpreter.pp_result ret
+          in
+          return_to_exit (valid_concrete_result ret))
 
     let exec files already_compiled debug outfile_opt no_heap () =
       let () = Config.current_exec_mode := Concrete in
       let () = PC.initialize Concrete in
       let () = Config.no_heap := no_heap in
       let e_prog =
-        if not already_compiled then (
-          let e_progs =
-            (get_progs_or_fail (PC.parse_and_compile_files files)).gil_progs
-          in
-          Gil_parsing.cache_labelled_progs (List.tl e_progs);
-          snd (List.hd e_progs) )
-        else Gil_parsing.parse_eprog_from_file (List.hd files)
+        if not already_compiled then
+          L.with_normal_phase ~title:"Parsing and Compilation" (fun () ->
+              let e_progs =
+                (get_progs_or_fail (PC.parse_and_compile_files files)).gil_progs
+              in
+              Gil_parsing.cache_labelled_progs (List.tl e_progs);
+              snd (List.hd e_progs))
+        else
+          L.with_normal_phase ~title:"Parsing" (fun () ->
+              Gil_parsing.parse_eprog_from_file (List.hd files))
       in
       let prog =
-        Gil_parsing.eprog_to_prog
-          ~other_imports:(convert_other_imports PC.other_imports)
-          e_prog
+        L.with_normal_phase ~title:"Preprocessing" (fun () ->
+            Gil_parsing.eprog_to_prog
+              ~other_imports:(convert_other_imports PC.other_imports)
+              e_prog)
       in
       let () = run debug prog in
       Logging.wrap_up ()
@@ -323,47 +328,48 @@ struct
   module SInterpreterConsole = struct
     let process_files files already_compiled outfile_opt =
       let e_prog =
-        if not already_compiled then (
-          let () =
-            L.verbose (fun m ->
-                m
-                  "@\n\
-                   *** Stage 1: Parsing program in original language and \
-                   compiling to Gil. ***@\n")
-          in
-          let e_progs =
-            (get_progs_or_fail (PC.parse_and_compile_files files)).gil_progs
-          in
-          Gil_parsing.cache_labelled_progs (List.tl e_progs);
-          snd (List.hd e_progs) )
+        if not already_compiled then
+          L.with_normal_phase ~title:"Parsing and Compilation" (fun () ->
+              L.verbose (fun m ->
+                  m
+                    "@\n\
+                     *** Stage 1: Parsing program in original language and \
+                     compiling to Gil. ***@\n");
+              let e_progs =
+                (get_progs_or_fail (PC.parse_and_compile_files files)).gil_progs
+              in
+              Gil_parsing.cache_labelled_progs (List.tl e_progs);
+              snd (List.hd e_progs))
         else
-          let () =
-            L.verbose (fun m -> m "@\n*** Stage 1: Parsing Gil program. ***@\n")
-          in
-          Gil_parsing.parse_eprog_from_file (List.hd files)
-      in
-      let () = burn_gil e_prog outfile_opt in
-      let () =
-        L.normal (fun m -> m "*** Stage 2: Transforming the program.\n")
+          L.with_normal_phase ~title:"Parsing" (fun () ->
+              L.verbose (fun m ->
+                  m "@\n*** Stage 1: Parsing Gil program. ***@\n");
+              Gil_parsing.parse_eprog_from_file (List.hd files))
       in
       let prog =
-        Gil_parsing.eprog_to_prog
-          ~other_imports:(convert_other_imports PC.other_imports)
-          e_prog
+        L.with_normal_phase ~title:"Preprocessing" (fun () ->
+            burn_gil e_prog outfile_opt;
+            L.normal (fun m -> m "*** Stage 2: Transforming the program.\n");
+            let prog =
+              Gil_parsing.eprog_to_prog
+                ~other_imports:(convert_other_imports PC.other_imports)
+                e_prog
+            in
+            L.normal (fun m ->
+                m "\n*** Stage 2: DONE transforming the program.\n");
+            prog)
       in
-      let () =
-        L.normal (fun m -> m "\n*** Stage 2: DONE transforming the program.\n")
-      in
-      let () = L.normal (fun m -> m "*** Stage 3: Symbolic Execution.\n") in
-      match UP.init_prog prog with
-      | Error _  -> failwith "Creation of unification plans failed"
-      | Ok prog' ->
-          let _rets : SInterpreter.result_t list =
-            SInterpreter.evaluate_proc
-              (fun x -> x)
-              prog' "main" [] (SState.init None)
-          in
-          ()
+      L.with_normal_phase ~title:"Symbolic execution" (fun () ->
+          L.normal (fun m -> m "*** Stage 3: Symbolic Execution.\n");
+          match UP.init_prog prog with
+          | Error _  -> failwith "Creation of unification plans failed"
+          | Ok prog' ->
+              let _rets : SInterpreter.result_t list =
+                SInterpreter.evaluate_proc
+                  (fun x -> x)
+                  prog' "main" [] (SState.init None)
+              in
+              ())
 
     let wpst files already_compiled outfile_opt no_heap stats parallel () =
       let () = Config.current_exec_mode := Symbolic in
@@ -416,32 +422,36 @@ struct
     let process_files files already_compiled outfile_opt no_unfold incremental =
       let e_prog, source_files_opt =
         if not already_compiled then
-          let progs = get_progs_or_fail (PC.parse_and_compile_files files) in
-          let e_progs = progs.gil_progs in
-          let () = Gil_parsing.cache_labelled_progs (List.tl e_progs) in
-          let e_prog = snd (List.hd e_progs) in
-          let source_files = progs.source_files in
-          (e_prog, Some source_files)
+          L.with_normal_phase ~title:"Parsing and Compilation" (fun () ->
+              let progs =
+                get_progs_or_fail (PC.parse_and_compile_files files)
+              in
+              let e_progs = progs.gil_progs in
+              let () = Gil_parsing.cache_labelled_progs (List.tl e_progs) in
+              let e_prog = snd (List.hd e_progs) in
+              let source_files = progs.source_files in
+              (e_prog, Some source_files))
         else
-          let e_prog = Gil_parsing.parse_eprog_from_file (List.hd files) in
-          (e_prog, None)
+          L.with_normal_phase ~title:"Parsing" (fun () ->
+              let e_prog = Gil_parsing.parse_eprog_from_file (List.hd files) in
+              (e_prog, None))
       in
-      let () = burn_gil e_prog outfile_opt in
-      (* Prog.perform_syntax_checks e_prog; *)
       let prog =
-        Gil_parsing.eprog_to_prog
-          ~other_imports:(convert_other_imports PC.other_imports)
-          e_prog
-      in
-      let () =
-        L.verbose (fun m ->
-            m "@\nProgram as parsed:@\n%a@\n" Prog.pp_indexed prog)
-      in
-      let prog = LogicPreprocessing.preprocess prog (not no_unfold) in
-      let () =
-        L.verbose (fun m ->
-            m "@\nProgram after logic preprocessing:@\n%a@\n" Prog.pp_indexed
-              prog)
+        L.with_normal_phase ~title:"Preprocessing" (fun () ->
+            burn_gil e_prog outfile_opt;
+            (* Prog.perform_syntax_checks e_prog; *)
+            let prog =
+              Gil_parsing.eprog_to_prog
+                ~other_imports:(convert_other_imports PC.other_imports)
+                e_prog
+            in
+            L.verbose (fun m ->
+                m "@\nProgram as parsed:@\n%a@\n" Prog.pp_indexed prog);
+            let prog = LogicPreprocessing.preprocess prog (not no_unfold) in
+            L.verbose (fun m ->
+                m "@\nProgram after logic preprocessing:@\n%a@\n"
+                  Prog.pp_indexed prog);
+            prog)
       in
       Verification.verify_prog prog incremental source_files_opt
 

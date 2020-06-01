@@ -206,36 +206,38 @@ let simplify_pfs_and_gamma
 
 let check_satisfiability_with_model (fs : Formula.t list) (gamma : TypEnv.t) :
     SSubst.t option =
-  let fs, gamma, subst = simplify_pfs_and_gamma fs gamma in
-  let model = Z3Encoding.check_sat_core fs gamma in
-  let lvars =
-    List.fold_left
-      (fun ac vs -> Var.Set.union ac vs)
-      Var.Set.empty
-      (List.map Formula.lvars (Formula.Set.elements fs))
-  in
-  let z3_vars = Var.Set.diff lvars (SSubst.domain subst None) in
-  L.(
-    verbose (fun m ->
-        m "OBTAINED VARS: %s\n" (String.concat ", " (SS.elements z3_vars))));
-  match model with
-  | None       -> None
-  | Some model -> (
-      try
-        Z3Encoding.lift_z3_model model gamma subst z3_vars;
-        Some subst
-      with _ -> None )
+  L.with_normal_phase ~title:"Z3 checking satisfiability with model" (fun () ->
+      let fs, gamma, subst = simplify_pfs_and_gamma fs gamma in
+      let model = Z3Encoding.check_sat_core fs gamma in
+      let lvars =
+        List.fold_left
+          (fun ac vs -> Var.Set.union ac vs)
+          Var.Set.empty
+          (List.map Formula.lvars (Formula.Set.elements fs))
+      in
+      let z3_vars = Var.Set.diff lvars (SSubst.domain subst None) in
+      L.(
+        verbose (fun m ->
+            m "OBTAINED VARS: %s\n" (String.concat ", " (SS.elements z3_vars))));
+      match model with
+      | None       -> None
+      | Some model -> (
+          try
+            Z3Encoding.lift_z3_model model gamma subst z3_vars;
+            Some subst
+          with _ -> None ))
 
 let check_satisfiability
     ?(unification = false) (fs : Formula.t list) (gamma : TypEnv.t) : bool =
-  (* let t = time() in *)
-  L.verbose (fun m -> m "Entering FOSolver.check_satisfiability");
-  let fs, gamma, _ = simplify_pfs_and_gamma ~unification fs gamma in
-  (* let axioms    = get_axioms (Formula.Set.elements fs) gamma in
-     let fs           = Formula.Set.union fs (Formula.Set.of_list axioms) in *)
-  let result = Z3Encoding.check_sat fs gamma in
-  (* update_statistics "FOS: CheckSat" (time() -. t); *)
-  result
+  L.with_normal_phase ~title:"Z3 checking satisfiability" (fun () ->
+      (* let t = time() in *)
+      L.verbose (fun m -> m "Entering FOSolver.check_satisfiability");
+      let fs, gamma, _ = simplify_pfs_and_gamma ~unification fs gamma in
+      (* let axioms    = get_axioms (Formula.Set.elements fs) gamma in
+         let fs           = Formula.Set.union fs (Formula.Set.of_list axioms) in *)
+      let result = Z3Encoding.check_sat fs gamma in
+      (* update_statistics "FOS: CheckSat" (time() -. t); *)
+      result)
 
 (** ************
   * ENTAILMENT *
@@ -246,90 +248,93 @@ let check_entailment
     (left_fs : Formula.t list)
     (right_fs : Formula.t list)
     (gamma : TypEnv.t) : bool =
-  L.verbose (fun m ->
-      m
-        "Preparing entailment check:@\n\
-         Existentials:@\n\
-         @[<h>%a@]@\n\
-         Left:%a@\n\
-         Right:%a@\n\
-         Gamma:@\n\
-         %a@\n"
-        (Fmt.iter ~sep:Fmt.comma SS.iter Fmt.string)
-        existentials PFS.pp (PFS.of_list left_fs) PFS.pp (PFS.of_list right_fs)
-        TypEnv.pp gamma);
+  L.with_normal_phase ~title:"Z3 checking entailment" (fun () ->
+      L.verbose (fun m ->
+          m
+            "Preparing entailment check:@\n\
+             Existentials:@\n\
+             @[<h>%a@]@\n\
+             Left:%a@\n\
+             Right:%a@\n\
+             Gamma:@\n\
+             %a@\n"
+            (Fmt.iter ~sep:Fmt.comma SS.iter Fmt.string)
+            existentials PFS.pp (PFS.of_list left_fs) PFS.pp
+            (PFS.of_list right_fs) TypEnv.pp gamma);
 
-  (* SOUNDNESS !!DANGER!!: call to simplify_implication       *)
-  (* Simplify maximally the implication to be checked         *)
-  (* Remove from the typing environment the unused variables  *)
-  let gamma = TypEnv.copy gamma in
-  let left_fs = PFS.of_list left_fs in
-  let right_fs = PFS.of_list right_fs in
-  let left_lvars = PFS.lvars left_fs in
-  let right_lvars = PFS.lvars right_fs in
-  let existentials =
-    Simplifications.simplify_implication existentials left_fs right_fs gamma
-  in
-  TypEnv.filter_vars_in_place gamma (SS.union left_lvars right_lvars);
-
-  (* Separate gamma into existentials and non-existentials *)
-  let left_fs = PFS.to_list left_fs in
-  let right_fs = PFS.to_list right_fs in
-  let gamma_left = TypEnv.filter gamma (fun v -> not (SS.mem v existentials)) in
-  let gamma_right = TypEnv.filter gamma (fun v -> SS.mem v existentials) in
-
-  (* If left side is false, return false *)
-  if List.length left_fs > 0 && List.hd left_fs = False then false
-    (* If right side is false, return false *)
-  else if List.length right_fs > 0 && List.hd right_fs = False then false
-  else
-    (* Check satisfiability of left side *)
-    let left_sat =
-      Z3Encoding.check_sat (Formula.Set.of_list left_fs) gamma_left
-    in
-
-    (* If the right side is empty or left side is not satisfiable, return the result of
-       checking left-side satisfiability *)
-    if List.length right_fs = 0 || not left_sat then left_sat
-    else
-      (* A => B -> Axioms(A) /\ Axioms(B) /\ A => B
-                -> !(Axioms(A) /\ Axioms(B) /\ A) \/ B
-                -> Axioms(A) /\ Axioms(B) /\ A /\ !B is SAT *)
-      (* Existentials in B need to be turned into universals *)
-      (* A => Exists (x1, ..., xn) B
-                -> Axioms(A) /\ A => (Exists (x1, ..., xn) (Axioms(B) => B)
-                -> !(Axioms(A) /\ A) \/ (Exists (x1, ..., xn) (Axioms(B) => B))
-                -> Axioms(A) /\ A /\ (ForAll (x1, ..., x2) Axioms(B) /\ !B) is SAT
-                -> ForAll (x1, ..., x2)  Axioms(A) /\ Axioms(B) /\ A /\ !B is SAT *)
-
-      (* Get axioms *)
-      (* let axioms   = get_axioms (left_fs @ right_fs) gamma in *)
-      let right_fs =
-        List.map
-          (fun f -> (Formula.push_in_negations (Not f) : Formula.t))
-          right_fs
+      (* SOUNDNESS !!DANGER!!: call to simplify_implication       *)
+      (* Simplify maximally the implication to be checked         *)
+      (* Remove from the typing environment the unused variables  *)
+      let gamma = TypEnv.copy gamma in
+      let left_fs = PFS.of_list left_fs in
+      let right_fs = PFS.of_list right_fs in
+      let left_lvars = PFS.lvars left_fs in
+      let right_lvars = PFS.lvars right_fs in
+      let existentials =
+        Simplifications.simplify_implication existentials left_fs right_fs gamma
       in
-      let right_f : Formula.t =
-        if SS.is_empty existentials then Formula.disjunct right_fs
+      TypEnv.filter_vars_in_place gamma (SS.union left_lvars right_lvars);
+
+      (* Separate gamma into existentials and non-existentials *)
+      let left_fs = PFS.to_list left_fs in
+      let right_fs = PFS.to_list right_fs in
+      let gamma_left =
+        TypEnv.filter gamma (fun v -> not (SS.mem v existentials))
+      in
+      let gamma_right = TypEnv.filter gamma (fun v -> SS.mem v existentials) in
+
+      (* If left side is false, return false *)
+      if List.length left_fs > 0 && List.hd left_fs = False then false
+        (* If right side is false, return false *)
+      else if List.length right_fs > 0 && List.hd right_fs = False then false
+      else
+        (* Check satisfiability of left side *)
+        let left_sat =
+          Z3Encoding.check_sat (Formula.Set.of_list left_fs) gamma_left
+        in
+
+        (* If the right side is empty or left side is not satisfiable, return the result of
+           checking left-side satisfiability *)
+        if List.length right_fs = 0 || not left_sat then left_sat
         else
-          let binders =
+          (* A => B -> Axioms(A) /\ Axioms(B) /\ A => B
+                    -> !(Axioms(A) /\ Axioms(B) /\ A) \/ B
+                    -> Axioms(A) /\ Axioms(B) /\ A /\ !B is SAT *)
+          (* Existentials in B need to be turned into universals *)
+          (* A => Exists (x1, ..., xn) B
+                    -> Axioms(A) /\ A => (Exists (x1, ..., xn) (Axioms(B) => B)
+                    -> !(Axioms(A) /\ A) \/ (Exists (x1, ..., xn) (Axioms(B) => B))
+                    -> Axioms(A) /\ A /\ (ForAll (x1, ..., x2) Axioms(B) /\ !B) is SAT
+                    -> ForAll (x1, ..., x2)  Axioms(A) /\ Axioms(B) /\ A /\ !B is SAT *)
+
+          (* Get axioms *)
+          (* let axioms   = get_axioms (left_fs @ right_fs) gamma in *)
+          let right_fs =
             List.map
-              (fun x -> (x, TypEnv.get gamma_right x))
-              (SS.elements existentials)
+              (fun f -> (Formula.push_in_negations (Not f) : Formula.t))
+              right_fs
           in
-          ForAll (binders, Formula.disjunct right_fs)
-      in
+          let right_f : Formula.t =
+            if SS.is_empty existentials then Formula.disjunct right_fs
+            else
+              let binders =
+                List.map
+                  (fun x -> (x, TypEnv.get gamma_right x))
+                  (SS.elements existentials)
+              in
+              ForAll (binders, Formula.disjunct right_fs)
+          in
 
-      let formulae = PFS.of_list (right_f :: (left_fs @ [] (* axioms *))) in
-      let _ = Simplifications.simplify_pfs_and_gamma formulae gamma_left in
+          let formulae = PFS.of_list (right_f :: (left_fs @ [] (* axioms *))) in
+          let _ = Simplifications.simplify_pfs_and_gamma formulae gamma_left in
 
-      let ret =
-        Z3Encoding.check_sat
-          (Formula.Set.of_list (PFS.to_list formulae))
-          gamma_left
-      in
-      L.(verbose (fun m -> m "Entailment returned %b" (not ret)));
-      not ret
+          let ret =
+            Z3Encoding.check_sat
+              (Formula.Set.of_list (PFS.to_list formulae))
+              gamma_left
+          in
+          L.(verbose (fun m -> m "Entailment returned %b" (not ret)));
+          not ret)
 
 let is_equal_on_lexprs e1 e2 pfs : bool option =
   match e1 = e2 with

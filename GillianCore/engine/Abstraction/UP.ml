@@ -604,38 +604,39 @@ let init_preds (preds : (string, Pred.t) Hashtbl.t) :
   with UPError e -> Error e
 
 let init_prog (prog : ('a, int) Prog.t) : (prog, up_err_t) result =
-  let all_specs : Spec.t list = Prog.get_specs prog in
+  L.with_normal_phase ~title:"Program initialization" (fun () ->
+      let all_specs : Spec.t list = Prog.get_specs prog in
 
-  let lemmas : Lemma.t list = Prog.get_lemmas prog in
-  let preds_tbl : ((string, pred) Hashtbl.t, up_err_t) result =
-    init_preds prog.preds
-  in
-  match preds_tbl with
-  | Error e      -> Error e
-  | Ok preds_tbl -> (
-      let lemmas_tbl : ((string, lemma) Hashtbl.t, up_err_t) result =
-        init_lemmas prog.preds lemmas
+      let lemmas : Lemma.t list = Prog.get_lemmas prog in
+      let preds_tbl : ((string, pred) Hashtbl.t, up_err_t) result =
+        init_preds prog.preds
       in
-      match lemmas_tbl with
-      | Error e       -> Error e
-      | Ok lemmas_tbl -> (
-          let specs_tbl : ((string, spec) Hashtbl.t, up_err_t) result =
-            init_specs prog.preds all_specs
+      match preds_tbl with
+      | Error e      -> Error e
+      | Ok preds_tbl -> (
+          let lemmas_tbl : ((string, lemma) Hashtbl.t, up_err_t) result =
+            init_lemmas prog.preds lemmas
           in
-          match specs_tbl with
-          | Error e      -> Error e
-          | Ok specs_tbl ->
-              let coverage : (string * int, int) Hashtbl.t =
-                Hashtbl.create Config.big_tbl_size
+          match lemmas_tbl with
+          | Error e       -> Error e
+          | Ok lemmas_tbl -> (
+              let specs_tbl : ((string, spec) Hashtbl.t, up_err_t) result =
+                init_specs prog.preds all_specs
               in
-              Ok
-                {
-                  prog;
-                  specs = specs_tbl;
-                  preds = preds_tbl;
-                  lemmas = lemmas_tbl;
-                  coverage;
-                } ) )
+              match specs_tbl with
+              | Error e      -> Error e
+              | Ok specs_tbl ->
+                  let coverage : (string * int, int) Hashtbl.t =
+                    Hashtbl.create Config.big_tbl_size
+                  in
+                  Ok
+                    {
+                      prog;
+                      specs = specs_tbl;
+                      preds = preds_tbl;
+                      lemmas = lemmas_tbl;
+                      coverage;
+                    } ) ))
 
 let rec expr_compatible e e' subst : bool =
   let result =

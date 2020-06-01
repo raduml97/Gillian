@@ -343,7 +343,7 @@ module Make
              @[%a@]@]"
             name pp old_astate
         in
-        L.normal (fun m -> m "%s" msg);
+        L.normal ~severity:Error (fun m -> m "%s" msg);
         raise (Failure msg)
 
   let fresh_subst (xs : SS.t) : Subst.t =
@@ -432,6 +432,7 @@ module Make
                 Fmt.(list ~sep:comma Val.pp)
                 vs SLCmd.pp_folding_info folding_info
             in
+            L.verbose ~severity:Error (fun m -> m "%s" msg);
             raise (Failure msg) )
     | Unfold (pname, les, unfold_info, b) -> (
         let pred = UP.get_pred_def prog.preds pname in

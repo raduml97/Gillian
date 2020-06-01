@@ -233,40 +233,45 @@ module Make (SMemory : SMemory.S) :
       ?(kill_new_lvars : bool option)
       ?(unification = false)
       (state : t) : st =
-    (* let start_time = time() in  *)
-    let kill_new_lvars = Option.value ~default:true kill_new_lvars in
-    let heap, store, pfs, gamma, svars = state in
-    let save_spec_vars = if save then (SS.empty, true) else (svars, false) in
-    L.verbose (fun m ->
-        m
-          "-----------------------------------\n\
-           STATE BEFORE SIMPLIFICATIONS:\n\
-           %a\n\
-           -----------------------------------"
-          pp state);
-    let subst, _ =
-      Simplifications.simplify_pfs_and_gamma ~kill_new_lvars pfs gamma
-        ~unification ~save_spec_vars
-    in
-    SMemory.substitution_in_place subst heap;
-    SStore.substitution_in_place subst store;
-    if not kill_new_lvars then Typing.naively_infer_type_information pfs gamma;
-    L.verbose (fun m ->
-        m
-          "-----------------------------------\n\
-           STATE AFTER SIMPLIFICATIONS:@\n\
-           @[%a@]@\n\
-           @\n\
-           @[<v 2>with substitution:@\n\
-           @[%a@]@\n\
-           -----------------------------------"
-          pp state SVal.SSubst.pp subst);
-    (* update_statistics) "Simplify" (time() -. start_time); *)
-    subst
+    L.with_normal_phase ~title:"Simplification of symbolic state" (fun () ->
+        (* let start_time = time() in  *)
+        let kill_new_lvars = Option.value ~default:true kill_new_lvars in
+        let heap, store, pfs, gamma, svars = state in
+        let save_spec_vars =
+          if save then (SS.empty, true) else (svars, false)
+        in
+        L.verbose (fun m ->
+            m
+              "-----------------------------------\n\
+               STATE BEFORE SIMPLIFICATIONS:\n\
+               %a\n\
+               -----------------------------------"
+              pp state);
+        let subst, _ =
+          Simplifications.simplify_pfs_and_gamma ~kill_new_lvars pfs gamma
+            ~unification ~save_spec_vars
+        in
+        SMemory.substitution_in_place subst heap;
+        SStore.substitution_in_place subst store;
+        if not kill_new_lvars then
+          Typing.naively_infer_type_information pfs gamma;
+        L.verbose (fun m ->
+            m
+              "-----------------------------------\n\
+               STATE AFTER SIMPLIFICATIONS:@\n\
+               @[%a@]@\n\
+               @\n\
+               @[<v 2>with substitution:@\n\
+               @[%a@]@\n\
+               -----------------------------------"
+              pp state SVal.SSubst.pp subst);
+        (* update_statistics) "Simplify" (time() -. start_time); *)
+        subst)
 
   let simplify_val (state : t) (v : vt) : vt =
-    let _, _, pfs, gamma, _ = state in
-    Reduction.reduce_lexpr ~gamma ~pfs v
+    L.with_normal_phase ~title:"Simplification of value" (fun () ->
+        let _, _, pfs, gamma, _ = state in
+        Reduction.reduce_lexpr ~gamma ~pfs v)
 
   let to_loc (state : t) (loc : vt) : (t * vt) option =
     let _, _, pfs, gamma, _ = state in

@@ -272,7 +272,7 @@ struct
            (fun ac result ->
              match (result : SAInterpreter.result_t) with
              | ExecRes.RFail (proc, i, state, errs) ->
-                 L.verbose (fun m ->
+                 L.verbose ~severity:Error (fun m ->
                      m
                        "VERIFICATION FAILURE: Procedure %s, Command %d\n\
                         Spec %s %d\n\
@@ -286,7 +286,7 @@ struct
                  false
              | ExecRes.RSucc (fl, v, state) ->
                  if Some fl <> test.flag then (
-                   L.normal (fun m ->
+                   L.normal ~severity:Error (fun m ->
                        m
                          "VERIFICATION FAILURE: Spec %s %d terminated with \
                           flag %s instead of %s\n"
@@ -295,14 +295,14 @@ struct
                  else
                    let subst = make_post_subst test state in
                    if analyse_result subst test state then (
-                     L.normal (fun m ->
+                     L.normal ~severity:Success (fun m ->
                          m
                            "VERIFICATION SUCCESS: Spec %s %d terminated \
                             successfully\n"
                            test.name test.id);
                      ac )
                    else (
-                     L.normal (fun m ->
+                     L.normal ~severity:Error (fun m ->
                          m
                            "VERIFICATION FAILURE: Spec %s %d - post condition \
                             not unifiable\n"
@@ -325,13 +325,13 @@ struct
            (fun ac final_state ->
              let subst = make_post_subst test final_state in
              if analyse_result subst test final_state then (
-               L.normal (fun m ->
+               L.normal ~severity:Success (fun m ->
                    m
                      "VERIFICATION SUCCESS: Spec %s %d terminated successfully\n"
                      test.name test.id);
                ac )
              else (
-               L.normal (fun m ->
+               L.normal ~severity:Error (fun m ->
                    m
                      "VERIFICATION FAILURE: Spec %s %d - post condition not \
                       unifiable\n"
@@ -348,38 +348,42 @@ struct
     success
 
   let verify (prog : UP.prog) (test : t) : bool =
-    let state' = SPState.add_pred_defs prog.preds test.pre_state in
+    let aux (prog : UP.prog) test =
+      let state' = SPState.add_pred_defs prog.preds test.pre_state in
 
-    (* Printf.printf "Inside verify with a test for %s\n" test.name; *)
-    match test.flag with
-    | Some flag ->
-        let msg = "Verifying one spec of procedure " ^ test.name ^ "... " in
-        L.tmi (fun fmt -> fmt "%s" msg);
-        Fmt.pr "%s" msg;
-        (* TEST for procedure *)
-        let rets =
-          SAInterpreter.evaluate_proc
-            (fun x -> x)
-            prog test.name test.params state'
-        in
-        L.verbose (fun m ->
-            m "Verification: Concluded evaluation: %d obtained results.%a@\n"
-              (List.length rets) SAInterpreter.pp_result rets);
-        analyse_proc_results test flag rets
-    | None      -> (
-        let lemma = Prog.get_lemma_exn prog.prog test.name in
-        match lemma.lemma_proof with
-        | None       ->
-            if !Config.lemma_proof then
-              raise
-                (Failure (Printf.sprintf "Lemma %s WITHOUT proof" test.name))
-            else true (* It's already correct *)
-        | Some proof ->
-            let msg = "Verifying lemma " ^ test.name ^ "... " in
-            L.tmi (fun fmt -> fmt "%s" msg);
-            Fmt.pr "%s" msg;
-            let rets = SAInterpreter.evaluate_lcmds prog proof state' in
-            analyse_lemma_results test rets )
+      (* Printf.printf "Inside verify with a test for %s\n" test.name; *)
+      match test.flag with
+      | Some flag ->
+          let msg = "Verifying one spec of procedure " ^ test.name ^ "... " in
+          L.tmi (fun fmt -> fmt "%s" msg);
+          Fmt.pr "%s" msg;
+          (* TEST for procedure *)
+          let rets =
+            SAInterpreter.evaluate_proc
+              (fun x -> x)
+              prog test.name test.params state'
+          in
+          L.verbose (fun m ->
+              m "Verification: Concluded evaluation: %d obtained results.%a@\n"
+                (List.length rets) SAInterpreter.pp_result rets);
+          analyse_proc_results test flag rets
+      | None      -> (
+          let lemma = Prog.get_lemma_exn prog.prog test.name in
+          match lemma.lemma_proof with
+          | None       ->
+              if !Config.lemma_proof then
+                raise
+                  (Failure (Printf.sprintf "Lemma %s WITHOUT proof" test.name))
+              else true (* It's already correct *)
+          | Some proof ->
+              let msg = "Verifying lemma " ^ test.name ^ "... " in
+              L.tmi (fun fmt -> fmt "%s" msg);
+              Fmt.pr "%s" msg;
+              let rets = SAInterpreter.evaluate_lcmds prog proof state' in
+              analyse_lemma_results test rets )
+    in
+    L.with_normal_phase ~title:("Verification of " ^ test.name) (fun () ->
+        aux prog test)
 
   let pred_extracting_visitor =
     object
@@ -471,65 +475,70 @@ struct
       (prog : (Annot.t, int) Prog.t)
       (pnames_to_verify : SS.t)
       (lnames_to_verify : SS.t) : unit =
-    let preds = prog.preds in
-    let start_time = Sys.time () in
+    let tests, tests', start_time =
+      L.with_normal_phase ~title:"Specs and Lemmas preprocessing" (fun () ->
+          let preds = prog.preds in
+          let start_time = Sys.time () in
 
-    (* STEP 1: Get the specs to verify *)
-    Printf.printf "Obtaining specs to verify...\n";
-    let specs_to_verify =
-      List.filter
-        (fun (spec : Spec.t) -> SS.mem spec.spec_name pnames_to_verify)
-        (Prog.get_specs prog)
+          (* STEP 1: Get the specs to verify *)
+          Printf.printf "Obtaining specs to verify...\n";
+          let specs_to_verify =
+            List.filter
+              (fun (spec : Spec.t) -> SS.mem spec.spec_name pnames_to_verify)
+              (Prog.get_specs prog)
+          in
+
+          (* STEP 2: Convert specs to symbolic tests *)
+          (* Printf.printf "Converting symbolic tests from specs: %f\n" (cur_time -. start_time); *)
+          let tests : t list =
+            List.concat
+              (List.map
+                 (fun spec ->
+                   let tests, new_spec = testify_spec preds spec in
+                   let proc = Prog.get_proc_exn prog spec.spec_name in
+                   Hashtbl.replace prog.procs proc.proc_name
+                     { proc with proc_spec = Some new_spec };
+                   tests)
+                 specs_to_verify)
+          in
+
+          (* STEP 3: Get the lemmas to verify *)
+          Printf.printf "Obtaining lemmas to verify...\n";
+          let lemmas_to_verify =
+            List.filter
+              (fun (lemma : Lemma.t) ->
+                SS.mem lemma.lemma_name lnames_to_verify)
+              (Prog.get_lemmas prog)
+          in
+
+          (* STEP 4: Convert lemmas to symbolic tests *)
+          (* Printf.printf "Converting symbolic tests from lemmas: %f\n" (cur_time -. start_time); *)
+          let tests' : t list =
+            List.concat
+              (List.map
+                 (fun lemma ->
+                   let tests, new_lemma = testify_lemma preds lemma in
+                   Hashtbl.replace prog.lemmas lemma.lemma_name new_lemma;
+                   tests)
+                 lemmas_to_verify)
+          in
+
+          Printf.printf "Obtained %d symbolic tests in total\n"
+            (List.length tests + List.length tests');
+
+          L.verbose (fun m ->
+              m
+                ( "@[-------------------------------------------------------------------------@\n"
+                ^^ "UNFOLDED and SIMPLIFIED SPECS and LEMMAS@\n%a@\n%a"
+                ^^ "@\n\
+                    -------------------------------------------------------------------------@]"
+                )
+                Fmt.(list ~sep:(any "@\n") Spec.pp)
+                (Prog.get_specs prog)
+                Fmt.(list ~sep:(any "@\n") Lemma.pp)
+                (Prog.get_lemmas prog));
+          (tests, tests', start_time))
     in
-
-    (* STEP 2: Convert specs to symbolic tests *)
-    (* Printf.printf "Converting symbolic tests from specs: %f\n" (cur_time -. start_time); *)
-    let tests : t list =
-      List.concat
-        (List.map
-           (fun spec ->
-             let tests, new_spec = testify_spec preds spec in
-             let proc = Prog.get_proc_exn prog spec.spec_name in
-             Hashtbl.replace prog.procs proc.proc_name
-               { proc with proc_spec = Some new_spec };
-             tests)
-           specs_to_verify)
-    in
-
-    (* STEP 3: Get the lemmas to verify *)
-    Printf.printf "Obtaining lemmas to verify...\n";
-    let lemmas_to_verify =
-      List.filter
-        (fun (lemma : Lemma.t) -> SS.mem lemma.lemma_name lnames_to_verify)
-        (Prog.get_lemmas prog)
-    in
-
-    (* STEP 4: Convert lemmas to symbolic tests *)
-    (* Printf.printf "Converting symbolic tests from lemmas: %f\n" (cur_time -. start_time); *)
-    let tests' : t list =
-      List.concat
-        (List.map
-           (fun lemma ->
-             let tests, new_lemma = testify_lemma preds lemma in
-             Hashtbl.replace prog.lemmas lemma.lemma_name new_lemma;
-             tests)
-           lemmas_to_verify)
-    in
-
-    Printf.printf "Obtained %d symbolic tests in total\n"
-      (List.length tests + List.length tests');
-
-    L.verbose (fun m ->
-        m
-          ( "@[-------------------------------------------------------------------------@\n"
-          ^^ "UNFOLDED and SIMPLIFIED SPECS and LEMMAS@\n%a@\n%a"
-          ^^ "@\n\
-              -------------------------------------------------------------------------@]"
-          )
-          Fmt.(list ~sep:(any "@\n") Spec.pp)
-          (Prog.get_specs prog)
-          Fmt.(list ~sep:(any "@\n") Lemma.pp)
-          (Prog.get_lemmas prog));
 
     (* STEP 4: Create unification plans for specs and predicates *)
     (* Printf.printf "Creating unification plans: %f\n" (cur_time -. start_time); *)
@@ -544,26 +553,27 @@ struct
           prog'.preds;
 
         (* STEP 6: Run the symbolic tests *)
-        let cur_time = Sys.time () in
-        Printf.printf "Running symbolic tests: %f\n" (cur_time -. start_time);
-        let success : bool =
-          List.fold_left
-            (fun ac test -> if verify prog' test then ac else false)
-            true (tests' @ tests)
-        in
-        let end_time = Sys.time () in
-        let cur_verified = SS.union pnames_to_verify lnames_to_verify in
-        let success =
-          success && check_previously_verified prev_results cur_verified
-        in
-        let msg : string =
-          if success then "All specs succeeded:" else "There were failures:"
-        in
-        let msg : string =
-          Printf.sprintf "%s %f%!" msg (end_time -. start_time)
-        in
-        Printf.printf "%s\n" msg;
-        L.normal (fun m -> m "%s" msg)
+        L.with_normal_phase ~title:"Verification of specs" (fun () ->
+            let cur_time = Sys.time () in
+            Printf.printf "Running symbolic tests: %f\n" (cur_time -. start_time);
+            let success : bool =
+              List.fold_left
+                (fun ac test -> if verify prog' test then ac else false)
+                true (tests' @ tests)
+            in
+            let end_time = Sys.time () in
+            let cur_verified = SS.union pnames_to_verify lnames_to_verify in
+            let success =
+              success && check_previously_verified prev_results cur_verified
+            in
+            let msg : string =
+              if success then "All specs succeeded:" else "There were failures:"
+            in
+            let msg : string =
+              Printf.sprintf "%s %f%!" msg (end_time -. start_time)
+            in
+            Printf.printf "%s\n" msg;
+            L.normal (fun m -> m "%s" msg))
 
   let verify_prog
       (prog : (Annot.t, int) Prog.t)
@@ -631,7 +641,7 @@ struct
         let call_graph = SAInterpreter.call_graph in
         write_verif_results cur_source_files call_graph ~diff:"" global_results
     in
-    L.with_normal_phase ~title:"Program verification" (fun () ->
+    L.with_normal_phase ~title:"Verification" (fun () ->
         f prog incremental source_files)
 end
 
