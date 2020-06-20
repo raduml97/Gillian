@@ -68,6 +68,7 @@ module Literal : sig
     | Type      of Type.t  (** GIL types ({!type:Type.t}) *)
     | LList     of t list  (** Lists of GIL literals *)
     | Nono  (** Negative information *)
+  [@@deriving yojson]
 
   (** Pretty-printer *)
   val pp : t Fmt.t

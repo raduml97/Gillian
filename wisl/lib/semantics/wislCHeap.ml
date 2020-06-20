@@ -1,7 +1,26 @@
 open Gillian.Concrete
 module Literal = Gillian.Gil_syntax.Literal
 
-type t = (string * int, Values.t) Hashtbl.t
+type ('a, 'b) hashtbl = ('a, 'b) Hashtbl.t
+
+type t = (string * int, Values.t) hashtbl [@@deriving yojson]
+
+module WLoggingImpl = struct
+  type nonrec t = WislHeap of t [@@deriving yojson]
+
+  let file_reporter = None
+
+  let database_reporter =
+    Some
+      ( object
+          inherit [t] Logging.DatabaseReporter.t
+
+          method specific_serializer = yojson_of_t
+        end
+        :> t Logging.DatabaseReporter.t )
+end
+
+module WLogging = Logging.Make (WLoggingImpl)
 
 let init () = Hashtbl.create 1
 
@@ -18,6 +37,7 @@ let alloc heap size =
       aux (current_offset - 1)
   in
   let () = aux (size - 1) in
+  WLogging.normal (WislHeap heap);
   loc
 
 let remove heap loc offset = Hashtbl.remove heap (loc, offset)

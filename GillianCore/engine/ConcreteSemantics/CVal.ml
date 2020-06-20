@@ -4,8 +4,14 @@
 (*                   *)
 (*********************)
 
-module rec M : (Val.S with type st = CSubst.t and type t = Literal.t) = struct
-  type t = Literal.t
+module rec M : (sig
+  include Val.S with type st = CSubst.t and type t = Literal.t
+
+  include Ppx_yojson_conv_lib.Yojsonable.S
+end
+with type st = CSubst.t
+ and type t = Literal.t) = struct
+  type t = Literal.t [@@deriving yojson]
 
   type st = CSubst.t
 
