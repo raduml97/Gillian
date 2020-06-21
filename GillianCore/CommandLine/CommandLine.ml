@@ -92,6 +92,8 @@ struct
     in
     Arg.(value & opt_all c v & info [ "r"; "reporters" ] ~docv:"REPORTERS" ~doc)
 
+  let use_fcall_phases = Arg.(value & flag & info [ "fcall" ])
+
   let output_gil =
     let doc =
       "If specified, will write the compiled GIL program into $(docv)."
@@ -371,13 +373,22 @@ struct
               in
               ())
 
-    let wpst files already_compiled outfile_opt no_heap stats parallel () =
+    let wpst
+        files
+        already_compiled
+        outfile_opt
+        no_heap
+        stats
+        parallel
+        use_fcall_phases
+        () =
       let () = Config.current_exec_mode := Symbolic in
       let () = PC.initialize Symbolic in
       Printexc.record_backtrace @@ L.Mode.enabled ();
       let () = Config.stats := stats in
       let () = Config.parallel := parallel in
       let () = Config.no_heap := no_heap in
+      Config.use_fcall_phases := use_fcall_phases;
       let () = process_files files already_compiled outfile_opt in
       let () = if stats then Statistics.print_statistics () in
       let () = Logging.wrap_up () in
@@ -391,7 +402,7 @@ struct
     let wpst_t =
       Term.(
         const wpst $ files $ already_compiled $ output_gil $ no_heap $ stats
-        $ parallel)
+        $ parallel $ use_fcall_phases)
 
     let wpst_info =
       let doc = "Symbolically executes a file of the target language" in

@@ -135,6 +135,14 @@ struct
    * Main Functions *
    * ************** *)
 
+  let fcall_flag = ref None
+
+  type outcome = Nothing | Returned | Failed
+
+  let outcome_of_fcall = ref Nothing
+
+  let phase_call_stack = Stack.create ()
+
   (**
     Evaluation of logic commands
 
@@ -211,6 +219,7 @@ struct
           match State.assert_a state [ f' ] with
           | true  -> [ state ]
           | false ->
+              if !Config.use_fcall_phases then outcome_of_fcall := Failed;
               let err = StateErr.EPure f' in
               let failing_model = State.sat_check_f state [ Not f' ] in
               let msg =
@@ -334,6 +343,17 @@ struct
     let eval_expr = make_eval_expr state in
     let proc_name, annot_cmd = get_cmd prog cs i in
     let _, cmd = annot_cmd in
+
+    if !Config.use_fcall_phases then
+      Option.iter
+        (fun pid ->
+          fcall_flag := None;
+          let phase =
+            L.normal_phase ~title:(Format.sprintf "Execution of %s" pid) ()
+          in
+          Stack.push phase phase_call_stack)
+        !fcall_flag;
+
     let aux
         (prog : UP.prog)
         (state : State.t)
@@ -361,6 +381,8 @@ struct
                 (Internal_error
                    "Procedure Call Error - unlifting procedure ID failed")
         in
+
+        if !Config.use_fcall_phases then fcall_flag := Some pid;
 
         let proc = Prog.get_proc prog.prog pid in
         let spec = Hashtbl.find_opt prog.specs pid in
@@ -657,6 +679,7 @@ struct
           let state' = update_store state x args in
           [ ConfCont (state', cs, i, i + 1, b_counter) ]
       | ReturnNormal ->
+          if !Config.use_fcall_phases then outcome_of_fcall := Returned;
           let v_ret = Store.get store Names.return_variable in
           let result =
             match (v_ret, cs) with
@@ -673,6 +696,7 @@ struct
           L.verbose (fun m -> m "Returning.");
           result
       | ReturnError -> (
+          if !Config.use_fcall_phases then outcome_of_fcall := Returned;
           let v_ret = Store.get store Names.return_variable in
           match (v_ret, cs) with
           | None, _ ->
@@ -690,9 +714,32 @@ struct
           in
           raise (Failure message)
     in
-    L.with_normal_phase
-      ~title:(Format.asprintf "Command: %a" Cmd.pp_indexed cmd) (fun () ->
-        aux prog state cs prev i b_counter)
+    let result =
+      try
+        Ok
+          (L.with_normal_phase
+             ~title:(Format.asprintf "Command: %a" Cmd.pp_indexed cmd)
+             (fun () -> aux prog state cs prev i b_counter))
+      with e -> Error e
+    in
+
+    ( if !Config.use_fcall_phases then
+      match !outcome_of_fcall with
+      | Nothing  -> ()
+      | Returned -> (
+          outcome_of_fcall := Nothing;
+          match Stack.pop_opt phase_call_stack with
+          | None       ->
+              L.normal ~severity:Success (fun pp ->
+                  pp "Execution terminated successfully")
+          | Some phase -> L.end_phase phase )
+      | Failed   ->
+          outcome_of_fcall := Nothing;
+          Stack.fold (fun () -> L.end_phase) () phase_call_stack );
+
+    match result with
+    | Ok ok   -> ok
+    | Error e -> raise e
 
   let protected_evaluate_cmd
       (prog : UP.prog)
@@ -734,7 +781,7 @@ struct
         let results = hold_results @ results in
         if not retry then results
         else (
-          L.(verbose (fun m -> m "Relaunching suspended confs"));
+          L.(tmi (fun m -> m "Relaunching suspended confs"));
           let hold_confs =
             List.filter (fun (_, pid) -> Hashtbl.mem prog.specs pid) on_hold
           in

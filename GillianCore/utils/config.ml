@@ -89,3 +89,5 @@ let set_runtime_paths, get_runtime_paths =
   in
   let get () = !runtime_paths in
   (set, get)
+
+let use_fcall_phases = ref false
